@@ -35,7 +35,26 @@ Use `cloud-init/k8s-full-calico.yaml` for your first node (control plane):
 
 The join command is saved to `/root/join.sh` for adding worker nodes.
 
-### Option 2: Base Ubuntu Image
+### Option 2: Bash Script (Alternative to Cloud-init)
+
+If cloud-init isn't working or you prefer a script-based approach, use `setup-k8s.sh`:
+
+**One-liner to download and execute:**
+
+```bash
+curl -fsSL https://your-server.com/setup-k8s.sh | sudo bash
+```
+
+Or download first, review, then execute:
+
+```bash
+curl -fsSL https://your-server.com/setup-k8s.sh -o setup-k8s.sh
+sudo bash setup-k8s.sh
+```
+
+⚠️ **Security Note:** Always review scripts before executing, especially from remote sources.
+
+### Option 3: Base Ubuntu Image
 
 Use `cloud-init/base-ubuntu.yaml` to create a base template with common packages and your SSH key. Then clone and customize from there.
 
@@ -61,7 +80,8 @@ See [MONITORING.md](MONITORING.md) for detailed setup instructions.
 
 ## Files
 
-- `cloud-init/k8s-full-calico.yaml` - Full Kubernetes + Calico + monitoring setup
+- `cloud-init/k8s-full-calico.yaml` - Full Kubernetes + Calico + monitoring setup (cloud-init)
+- `setup-k8s.sh` - Bash script alternative (same functionality as cloud-init)
 - `cloud-init/base-ubuntu.yaml` - Base Ubuntu configuration for templates
 - `MONITORING.md` - Monitoring configuration guide
 

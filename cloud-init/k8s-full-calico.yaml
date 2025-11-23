@@ -1,4 +1,7 @@
 #cloud-config
+# Combined Ubuntu base + Kubernetes with Calico configuration
+# Use this for full K8s control plane nodes with monitoring
+
 package_update: true
 package_upgrade: true
 
@@ -20,6 +23,10 @@ packages:
   - bash-completion
   - vim
   - htop
+  - net-tools
+  - iputils-ping
+  - wget
+  - git
 
 users:
   - name: matt
@@ -30,7 +37,20 @@ users:
     ssh_authorized_keys:
       - ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKDLDp6znRA+JepG9SOo4NAoB2NFToODqYf5ntRtYAON mat@Matthews-MBP.ip.lan
 
+# Disable password authentication for root
+disable_root: true
+
+# SSH configuration
+ssh_pwauth: false
+ssh_deletekeys: true
+ssh_genkeytypes: ['rsa', 'ecdsa', 'ed25519']
+
 write_files:
+  # Enable passwordless sudo for matt (explicit)
+  - path: /etc/sudoers.d/matt
+    permissions: "0440"
+    content: "matt ALL=(ALL) NOPASSWD:ALL\n"
+
   # Kernel modules and sysctls for Kubernetes networking
   - path: /etc/modules-load.d/k8s.conf
     permissions: "0644"
@@ -43,6 +63,14 @@ write_files:
       net.bridge.bridge-nf-call-iptables=1
       net.bridge.bridge-nf-call-ip6tables=1
       net.ipv4.ip_forward=1
+
+  # Basic system optimizations
+  - path: /etc/sysctl.d/99-cloud-init.conf
+    permissions: "0644"
+    content: |
+      # Basic network optimizations
+      net.ipv4.tcp_slow_start_after_idle = 0
+      net.ipv4.tcp_tw_reuse = 1
 
   # Containerd config will be generated from default in runcmd
   # (We write a minimal config here, but will use containerd config default as base)
@@ -401,6 +429,13 @@ runcmd:
     systemctl status node_exporter --no-pager || true
     systemctl status otelcol --no-pager || true
     echo "Node Exporter metrics available at: http://$(hostname -I | awk '{print $1}'):9100/metrics"
+
+  # Clean up apt cache to reduce image size
+  - apt-get clean
+  - apt-get autoremove -y
+
+  # Restart systemd-timesyncd to ensure time sync
+  - systemctl restart systemd-timesyncd || true
 
 final_message: |
   Single-node Kubernetes with Calico + WireGuard is ready!
