@@ -147,6 +147,10 @@ uninstall() {
     rm -rf /tmp/kubeadm-config.yaml.tmp 2>/dev/null || true
     rm -rf /tmp/tigera-operator.yaml 2>/dev/null || true
     rm -rf /tmp/custom-resources.yaml 2>/dev/null || true
+
+    # Clean up ssh host keys
+    rm -f /etc/ssh/*_key* ; dpkg-reconfigure openssh-server
+    log "SSH host keys cleaned up"
     
     # Clean up iptables rules (Kubernetes may have left some)
     log "Cleaning up iptables rules..."
