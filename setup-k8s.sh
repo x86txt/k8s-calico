@@ -299,14 +299,39 @@ done
 # ============================================================================
 
 log "Installing Calico CNI..."
-kubectl --kubeconfig=/etc/kubernetes/admin.conf apply -f \
-    https://raw.githubusercontent.com/projectcalico/calico/v3.28.0/manifests/tigera-operator.yaml
+
+# Download Calico operator manifest
+CALICO_OPERATOR_URL="https://raw.githubusercontent.com/projectcalico/calico/v3.28.0/manifests/tigera-operator.yaml"
+cd /tmp
+curl -fsSL "${CALICO_OPERATOR_URL}" -o tigera-operator.yaml
+
+# Clean up any existing problematic CRDs that might have oversized annotations
+log "Cleaning up any existing Calico CRDs with annotation issues..."
+kubectl --kubeconfig=/etc/kubernetes/admin.conf delete crd installations.operator.tigera.io 2>/dev/null || true
+kubectl --kubeconfig=/etc/kubernetes/admin.conf delete crd apiservers.operator.tigera.io 2>/dev/null || true
+kubectl --kubeconfig=/etc/kubernetes/admin.conf delete crd imagesets.operator.tigera.io 2>/dev/null || true
+sleep 2
+
+# Apply using server-side apply to avoid annotation size limits (Kubernetes 1.18+)
+# Falls back to regular apply if server-side isn't supported
+log "Applying Calico operator..."
+if kubectl --kubeconfig=/etc/kubernetes/admin.conf apply --server-side --force-conflicts -f tigera-operator.yaml 2>/dev/null; then
+    log "Applied using server-side apply (avoids annotation issues)"
+else
+    log "Falling back to regular apply..."
+    kubectl --kubeconfig=/etc/kubernetes/admin.conf apply -f tigera-operator.yaml
+fi
 
 log "Waiting for Calico operator to be ready..."
 sleep 10
 
-kubectl --kubeconfig=/etc/kubernetes/admin.conf apply -f \
-    https://raw.githubusercontent.com/projectcalico/calico/v3.28.0/manifests/custom-resources.yaml
+# Apply custom resources
+CALICO_CUSTOM_URL="https://raw.githubusercontent.com/projectcalico/calico/v3.28.0/manifests/custom-resources.yaml"
+curl -fsSL "${CALICO_CUSTOM_URL}" -o custom-resources.yaml
+kubectl --kubeconfig=/etc/kubernetes/admin.conf apply -f custom-resources.yaml
+
+# Clean up downloaded files
+rm -f tigera-operator.yaml custom-resources.yaml
 
 log "Waiting for Calico to be ready..."
 for i in {1..60}; do
