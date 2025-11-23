@@ -6,13 +6,186 @@
 # Parse arguments first before setting strict mode
 ARG1="${1:-}"
 
+# safety first, dog and cats, dont be a dummy
 set -euo pipefail
+# Note: trap removed - it would delete the script file on exit!
 
 # Version constants (update these as needed)
 KUBERNETES_VERSION="v1.34.0"
 CALICO_VERSION="v3.28.0"
 NODE_EXPORTER_VERSION="1.7.0"
 OTELCOL_VERSION="0.102.0"
+
+# ============================================================================
+# Version Checking Functions
+# ============================================================================
+
+# Compare semantic versions (returns 0 if latest > current, 1 otherwise)
+version_compare() {
+    local current="$1"
+    local latest="$2"
+    # Remove 'v' prefix if present
+    current="${current#v}"
+    latest="${latest#v}"
+    
+    # Use sort -V to check if latest is greater than current
+    # If latest comes after current when sorted, it's newer
+    local sorted=$(printf '%s\n%s\n' "$current" "$latest" | sort -V | tail -1)
+    if [ "$sorted" = "$latest" ] && [ "$latest" != "$current" ]; then
+        return 0  # latest > current
+    else
+        return 1  # latest <= current
+    fi
+}
+
+# Get latest GitHub release version
+get_latest_github_release() {
+    local repo="$1"
+    local current_version="$2"
+    
+    # Try to get latest release from GitHub API
+    local latest=$(curl -fsSL "https://api.github.com/repos/${repo}/releases/latest" 2>/dev/null | \
+        grep -oP '"tag_name":\s*"\K[^"]+' | head -1)
+    
+    if [ -z "$latest" ]; then
+        echo "$current_version"  # Return current if API fails
+        return 1
+    fi
+    
+    echo "$latest"
+    return 0
+}
+
+# Check for newer Kubernetes version
+check_kubernetes_version() {
+    log "Checking for newer Kubernetes version..."
+    # Kubernetes uses a different API - check pkgs.k8s.io or use a known pattern
+    # For now, we'll check GitHub kubernetes/kubernetes releases
+    local latest=$(get_latest_github_release "kubernetes/kubernetes" "$KUBERNETES_VERSION")
+    
+    if [ "$latest" != "$KUBERNETES_VERSION" ] && version_compare "$latest" "$KUBERNETES_VERSION"; then
+        echo "kubernetes:$KUBERNETES_VERSION:$latest"
+        return 0
+    fi
+    return 1
+}
+
+# Check for newer Calico version
+check_calico_version() {
+    log "Checking for newer Calico version..."
+    local latest=$(get_latest_github_release "projectcalico/calico" "$CALICO_VERSION")
+    
+    if [ "$latest" != "$CALICO_VERSION" ] && version_compare "$latest" "$CALICO_VERSION"; then
+        echo "calico:$CALICO_VERSION:$latest"
+        return 0
+    fi
+    return 1
+}
+
+# Check for newer Node Exporter version
+check_node_exporter_version() {
+    log "Checking for newer Node Exporter version..."
+    local latest=$(get_latest_github_release "prometheus/node_exporter" "v${NODE_EXPORTER_VERSION}")
+    
+    # Remove 'v' prefix for comparison
+    local latest_clean="${latest#v}"
+    
+    if [ "$latest_clean" != "$NODE_EXPORTER_VERSION" ] && version_compare "$latest_clean" "$NODE_EXPORTER_VERSION"; then
+        echo "node_exporter:$NODE_EXPORTER_VERSION:$latest_clean"
+        return 0
+    fi
+    return 1
+}
+
+# Check for newer OpenTelemetry Collector version
+check_otelcol_version() {
+    log "Checking for newer OpenTelemetry Collector version..."
+    local latest=$(get_latest_github_release "open-telemetry/opentelemetry-collector-releases" "v${OTELCOL_VERSION}")
+    
+    # Remove 'v' prefix for comparison
+    local latest_clean="${latest#v}"
+    
+    if [ "$latest_clean" != "$OTELCOL_VERSION" ] && version_compare "$latest_clean" "$OTELCOL_VERSION"; then
+        echo "otelcol:$OTELCOL_VERSION:$latest_clean"
+        return 0
+    fi
+    return 1
+}
+
+# Check all components and prompt user
+check_and_prompt_versions() {
+    local updates=()
+    local update_info
+    
+    # Check each component
+    if update_info=$(check_kubernetes_version 2>/dev/null); then
+        updates+=("$update_info")
+    fi
+    
+    if update_info=$(check_calico_version 2>/dev/null); then
+        updates+=("$update_info")
+    fi
+    
+    if update_info=$(check_node_exporter_version 2>/dev/null); then
+        updates+=("$update_info")
+    fi
+    
+    if update_info=$(check_otelcol_version 2>/dev/null); then
+        updates+=("$update_info")
+    fi
+    
+    # If no updates found, return
+    if [ ${#updates[@]} -eq 0 ]; then
+        log "All components are up to date!"
+        return 0
+    fi
+    
+    # Display available updates
+    echo ""
+    warn "Newer versions are available:"
+    for update in "${updates[@]}"; do
+        IFS=':' read -r component current latest <<< "$update"
+        echo "  - $component: $current → $latest"
+    done
+    echo ""
+    
+    # Prompt user with timeout
+    log "Update to newer versions? (y/N) [Timeout: 10 seconds, default: No]"
+    if read -t 10 -r response 2>/dev/null; then
+        if [[ "$response" =~ ^[Yy]$ ]]; then
+            log "Updating to newer versions..."
+            # Update version variables
+            for update in "${updates[@]}"; do
+                IFS=':' read -r component current latest <<< "$update"
+                case "$component" in
+                    kubernetes)
+                        KUBERNETES_VERSION="$latest"
+                        log "Updated Kubernetes version to $latest"
+                        ;;
+                    calico)
+                        CALICO_VERSION="$latest"
+                        log "Updated Calico version to $latest"
+                        ;;
+                    node_exporter)
+                        NODE_EXPORTER_VERSION="$latest"
+                        log "Updated Node Exporter version to $latest"
+                        ;;
+                    otelcol)
+                        OTELCOL_VERSION="$latest"
+                        log "Updated OpenTelemetry Collector version to $latest"
+                        ;;
+                esac
+            done
+            return 0
+        else
+            log "Using hardcoded versions as requested"
+            return 0
+        fi
+    else
+        log "No response received, using hardcoded versions (timeout)"
+        return 0
+    fi
+}
 
 # Colors for output
 RED='\033[0;31m'
@@ -218,6 +391,17 @@ if [[ -n "$ARG1" ]]; then
 fi
 
 log "Starting Kubernetes + Calico setup..."
+
+# ============================================================================
+# Check for Component Updates
+# ============================================================================
+
+# Check for newer versions (non-blocking, continues on failure)
+if command -v curl &>/dev/null; then
+    check_and_prompt_versions || warn "Version check failed, using hardcoded versions"
+else
+    warn "curl not available, skipping version check"
+fi
 
 # ============================================================================
 # System Configuration
