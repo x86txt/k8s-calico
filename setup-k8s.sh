@@ -196,7 +196,7 @@ networking:
 apiVersion: kubeadm.k8s.io/v1beta3
 kind: InitConfiguration
 nodeRegistration:
-  kubeletExtraArgs: {}
+  kubeletExtraArgs:
 EOF
 
 # Calico WireGuard config
@@ -254,10 +254,14 @@ if [ -z "$NODE_IP" ]; then
 fi
 
 if [ -n "$NODE_IP" ]; then
-    sed -i "/kubeletExtraArgs:/a\          node-ip: \"$NODE_IP\"" /etc/kubernetes/kubeadm-config.yaml
+    # Use awk to insert node-ip after kubeletExtraArgs: with proper indentation
+    awk -v ip="$NODE_IP" '/kubeletExtraArgs:/ {print; print "    node-ip: \"" ip "\""; next} {print}' /etc/kubernetes/kubeadm-config.yaml > /tmp/kubeadm-config.yaml.tmp
+    mv /tmp/kubeadm-config.yaml.tmp /etc/kubernetes/kubeadm-config.yaml
     log "Configured node-ip: $NODE_IP"
 else
     warn "Could not detect node IP, kubeadm will auto-detect"
+    # Add empty kubeletExtraArgs if no IP detected
+    echo "    {}" >> /etc/kubernetes/kubeadm-config.yaml
 fi
 
 # ============================================================================
