@@ -5,6 +5,12 @@
 
 set -euo pipefail
 
+# Version constants (update these as needed)
+KUBERNETES_VERSION="v1.34.0"
+CALICO_VERSION="v3.28.0"
+NODE_EXPORTER_VERSION="1.7.0"
+OTELCOL_VERSION="0.102.0"
+
 # Colors for output
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -83,11 +89,16 @@ else
     log "User 'matt' already exists"
 fi
 
-# Add SSH key
+# Add SSH key (avoid duplicates)
 SSH_KEY="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKDLDp6znRA+JepG9SOo4NAoB2NFToODqYf5ntRtYAON mat@Matthews-MBP.ip.lan"
 mkdir -p /home/matt/.ssh
-echo "$SSH_KEY" >> /home/matt/.ssh/authorized_keys
 chmod 700 /home/matt/.ssh
+if [ ! -f /home/matt/.ssh/authorized_keys ] || ! grep -qF "$SSH_KEY" /home/matt/.ssh/authorized_keys; then
+    echo "$SSH_KEY" >> /home/matt/.ssh/authorized_keys
+    log "Added SSH key for matt"
+else
+    log "SSH key already exists for matt"
+fi
 chmod 600 /home/matt/.ssh/authorized_keys
 chown -R matt:matt /home/matt/.ssh
 
@@ -95,11 +106,22 @@ chown -R matt:matt /home/matt/.ssh
 echo "matt ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/matt
 chmod 0440 /etc/sudoers.d/matt
 
-# SSH hardening
-sed -i 's/#PermitRootLogin yes/PermitRootLogin no/' /etc/ssh/sshd_config || true
-sed -i 's/#PasswordAuthentication yes/PasswordAuthentication no/' /etc/ssh/sshd_config || true
-sed -i 's/PasswordAuthentication yes/PasswordAuthentication no/' /etc/ssh/sshd_config || true
-systemctl restart sshd || warn "Failed to restart SSH"
+# SSH hardening (only restart if config was actually changed)
+SSH_CONFIG_CHANGED=false
+if grep -q "^PermitRootLogin yes" /etc/ssh/sshd_config || grep -q "^#PermitRootLogin yes" /etc/ssh/sshd_config; then
+    sed -i 's/#PermitRootLogin yes/PermitRootLogin no/' /etc/ssh/sshd_config
+    sed -i 's/^PermitRootLogin yes/PermitRootLogin no/' /etc/ssh/sshd_config
+    SSH_CONFIG_CHANGED=true
+fi
+if grep -q "^PasswordAuthentication yes" /etc/ssh/sshd_config || grep -q "^#PasswordAuthentication yes" /etc/ssh/sshd_config; then
+    sed -i 's/#PasswordAuthentication yes/PasswordAuthentication no/' /etc/ssh/sshd_config
+    sed -i 's/^PasswordAuthentication yes/PasswordAuthentication no/' /etc/ssh/sshd_config
+    SSH_CONFIG_CHANGED=true
+fi
+if [ "$SSH_CONFIG_CHANGED" = true ]; then
+    systemctl restart sshd || warn "Failed to restart SSH"
+    log "SSH configuration hardened"
+fi
 
 # ============================================================================
 # Kernel Modules and Sysctls
@@ -163,10 +185,14 @@ log "Containerd installed and configured"
 log "Installing Kubernetes components..."
 
 # Add Kubernetes repository
-curl -fsSL https://pkgs.k8s.io/core:/stable:/v1.34/deb/Release.key | \
-    gpg --dearmor --yes -o /usr/share/keyrings/kubernetes-archive-keyring.gpg
+# Remove old keyring if it exists
+rm -f /usr/share/keyrings/kubernetes-archive-keyring.gpg 2>/dev/null || true
 
-echo "deb [signed-by=/usr/share/keyrings/kubernetes-archive-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v1.34/deb/ /" > \
+# Download and import GPG key
+curl -fsSL "https://pkgs.k8s.io/core:/stable:/${KUBERNETES_VERSION}/deb/Release.key" | \
+    gpg --dearmor -o /usr/share/keyrings/kubernetes-archive-keyring.gpg
+
+echo "deb [signed-by=/usr/share/keyrings/kubernetes-archive-keyring.gpg] https://pkgs.k8s.io/core:/stable:/${KUBERNETES_VERSION}/deb/ /" > \
     /etc/apt/sources.list.d/kubernetes.list
 
 apt-get update -qq
@@ -186,10 +212,10 @@ log "Creating Kubernetes configuration files..."
 mkdir -p /etc/kubernetes/manifests
 
 # kubeadm config
-cat > /etc/kubernetes/kubeadm-config.yaml <<'EOF'
+cat > /etc/kubernetes/kubeadm-config.yaml <<EOF
 apiVersion: kubeadm.k8s.io/v1beta3
 kind: ClusterConfiguration
-kubernetesVersion: "v1.34.0"
+kubernetesVersion: "${KUBERNETES_VERSION}"
 networking:
   podSubnet: "192.168.0.0/16"  # matches Calico default IPv4 pool below
 ---
@@ -285,14 +311,20 @@ chmod 600 /root/.kube/config /home/matt/.kube/config
 # ============================================================================
 
 log "Waiting for Kubernetes API server to be ready..."
+API_READY=false
 for i in {1..30}; do
-    if kubectl --kubeconfig=/etc/kubernetes/admin.conf get nodes &>/dev/null; then
+    if kubectl --kubeconfig=/etc/kubernetes/admin.conf get --raw /healthz &>/dev/null && \
+       kubectl --kubeconfig=/etc/kubernetes/admin.conf get nodes &>/dev/null; then
         log "API server is ready"
+        API_READY=true
         break
     fi
     echo "Waiting... ($i/30)"
     sleep 10
 done
+if [ "$API_READY" = false ]; then
+    error "API server did not become ready within 5 minutes"
+fi
 
 # ============================================================================
 # Install Calico
@@ -301,9 +333,10 @@ done
 log "Installing Calico CNI..."
 
 # Download Calico operator manifest
-CALICO_OPERATOR_URL="https://raw.githubusercontent.com/projectcalico/calico/v3.28.0/manifests/tigera-operator.yaml"
-cd /tmp
-curl -fsSL "${CALICO_OPERATOR_URL}" -o tigera-operator.yaml
+CALICO_OPERATOR_URL="https://raw.githubusercontent.com/projectcalico/calico/${CALICO_VERSION}/manifests/tigera-operator.yaml"
+TMP_DIR=$(mktemp -d)
+cd "$TMP_DIR"
+curl -fsSL "${CALICO_OPERATOR_URL}" -o tigera-operator.yaml || error "Failed to download Calico operator manifest"
 
 # Clean up any existing problematic CRDs that might have oversized annotations
 log "Cleaning up any existing Calico CRDs with annotation issues..."
@@ -326,22 +359,29 @@ log "Waiting for Calico operator to be ready..."
 sleep 10
 
 # Apply custom resources
-CALICO_CUSTOM_URL="https://raw.githubusercontent.com/projectcalico/calico/v3.28.0/manifests/custom-resources.yaml"
-curl -fsSL "${CALICO_CUSTOM_URL}" -o custom-resources.yaml
+CALICO_CUSTOM_URL="https://raw.githubusercontent.com/projectcalico/calico/${CALICO_VERSION}/manifests/custom-resources.yaml"
+curl -fsSL "${CALICO_CUSTOM_URL}" -o custom-resources.yaml || error "Failed to download Calico custom resources"
 kubectl --kubeconfig=/etc/kubernetes/admin.conf apply -f custom-resources.yaml
 
 # Clean up downloaded files
-rm -f tigera-operator.yaml custom-resources.yaml
+cd /
+rm -rf "$TMP_DIR"
 
 log "Waiting for Calico to be ready..."
+CALICO_READY=false
 for i in {1..60}; do
-    if kubectl --kubeconfig=/etc/kubernetes/admin.conf get felixconfiguration default &>/dev/null; then
+    if kubectl --kubeconfig=/etc/kubernetes/admin.conf get felixconfiguration default &>/dev/null && \
+       kubectl --kubeconfig=/etc/kubernetes/admin.conf get pods -n calico-system -l k8s-app=calico-node --field-selector=status.phase=Running &>/dev/null; then
         log "Calico is ready"
+        CALICO_READY=true
         break
     fi
     echo "Waiting for Calico... ($i/60)"
     sleep 5
 done
+if [ "$CALICO_READY" = false ]; then
+    warn "Calico may not be fully ready, but continuing..."
+fi
 
 # Apply WireGuard and IP pool configs
 kubectl --kubeconfig=/etc/kubernetes/admin.conf apply -f \
@@ -510,15 +550,16 @@ EOF
 # ============================================================================
 
 log "Installing Prometheus Node Exporter..."
-NODE_EXPORTER_VERSION="1.7.0"
 NODE_EXPORTER_URL="https://github.com/prometheus/node_exporter/releases/download/v${NODE_EXPORTER_VERSION}/node_exporter-${NODE_EXPORTER_VERSION}.linux-amd64.tar.gz"
 
-cd /tmp
-curl -L -o node_exporter.tar.gz "${NODE_EXPORTER_URL}"
-tar xzf node_exporter.tar.gz
-cp node_exporter-${NODE_EXPORTER_VERSION}.linux-amd64/node_exporter /usr/local/bin/node_exporter
+TMP_DIR=$(mktemp -d)
+cd "$TMP_DIR"
+curl -fsSL -L -o node_exporter.tar.gz "${NODE_EXPORTER_URL}" || error "Failed to download Node Exporter"
+tar xzf node_exporter.tar.gz || error "Failed to extract Node Exporter"
+cp node_exporter-${NODE_EXPORTER_VERSION}.linux-amd64/node_exporter /usr/local/bin/node_exporter || error "Failed to install Node Exporter"
 chmod +x /usr/local/bin/node_exporter
-rm -rf node_exporter.tar.gz node_exporter-${NODE_EXPORTER_VERSION}.linux-amd64
+cd /
+rm -rf "$TMP_DIR"
 
 systemctl daemon-reload
 systemctl enable node_exporter
@@ -531,15 +572,16 @@ log "Prometheus Node Exporter installed and started on port 9100"
 # ============================================================================
 
 log "Installing OpenTelemetry Collector (Contrib)..."
-OTELCOL_VERSION="0.102.0"
 OTELCOL_URL="https://github.com/open-telemetry/opentelemetry-collector-releases/releases/download/v${OTELCOL_VERSION}/otelcol-contrib_${OTELCOL_VERSION}_linux_amd64.tar.gz"
 
-cd /tmp
-curl -L -o otelcol.tar.gz "${OTELCOL_URL}"
-tar xzf otelcol.tar.gz
-cp otelcol-contrib /usr/local/bin/otelcol
+TMP_DIR=$(mktemp -d)
+cd "$TMP_DIR"
+curl -fsSL -L -o otelcol.tar.gz "${OTELCOL_URL}" || error "Failed to download OpenTelemetry Collector"
+tar xzf otelcol.tar.gz || error "Failed to extract OpenTelemetry Collector"
+cp otelcol-contrib /usr/local/bin/otelcol || error "Failed to install OpenTelemetry Collector"
 chmod +x /usr/local/bin/otelcol
-rm -f otelcol.tar.gz LICENSE README.md
+cd /
+rm -rf "$TMP_DIR"
 
 # Create otelcol user
 useradd -r -s /bin/false otelcol || true
@@ -576,8 +618,11 @@ log "SigNoz endpoint configured: ${SIGNOZ_ENDPOINT}"
 # ============================================================================
 
 log "Cleaning up..."
-apt-get clean -qq
-apt-get autoremove -y -qq
+apt-get clean -qq || true
+apt-get autoremove -y -qq || true
+
+# Clean up any remaining temporary files
+rm -rf /tmp/kubeadm-config.yaml.tmp 2>/dev/null || true
 
 # ============================================================================
 # Display Status
