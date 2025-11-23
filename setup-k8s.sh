@@ -151,7 +151,17 @@ uninstall() {
     # Clean up ssh host keys
     rm -f /etc/ssh/*_key* ; dpkg-reconfigure openssh-server
     log "SSH host keys cleaned up"
-    
+
+    # Clean up machine-id
+    log "Cleaning up machine-id..."
+    sudo rm /etc/machine-id || true
+    sudo rm /var/lib/dbus/machine-id || true
+    log "Machine-id cleaned up"
+    touch /etc/machine-id || true
+    systemd-machine-id-setup || true
+    systemctl restart sshd || true
+    log "Machine-id setup complete"
+
     # Clean up iptables rules (Kubernetes may have left some)
     log "Cleaning up iptables rules..."
     iptables -F 2>/dev/null || true
@@ -235,17 +245,17 @@ apt-get upgrade -y -qq
 log "Installing base packages..."
 apt-get install -y -qq \
     apt-transport-https \
+    bash-completion \
     ca-certificates \
     curl \
+    git \
     gnupg \
-    lsb-release \
-    bash-completion \
-    vim \
     htop \
-    net-tools \
     iputils-ping \
-    wget \
-    git
+    lsb-release \
+    net-tools \
+    vim \
+    wget
 
 # ============================================================================
 # User Configuration
