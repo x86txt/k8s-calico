@@ -13,8 +13,8 @@ set -euo pipefail
 # Version constants (update these as needed)
 KUBERNETES_VERSION="v1.34.0"
 CALICO_VERSION="v3.28.0"
-NODE_EXPORTER_VERSION="1.7.0"
-OTELCOL_VERSION="0.102.0"
+NODE_EXPORTER_VERSION="1.10.2"
+OTELCOL_VERSION="0.140.1"
 
 # ============================================================================
 # Version Checking Functions
@@ -59,11 +59,10 @@ get_latest_github_release() {
 # Check for newer Kubernetes version
 check_kubernetes_version() {
     log "Checking for newer Kubernetes version..."
-    # Kubernetes uses a different API - check pkgs.k8s.io or use a known pattern
-    # For now, we'll check GitHub kubernetes/kubernetes releases
-    local latest=$(get_latest_github_release "kubernetes/kubernetes" "$KUBERNETES_VERSION")
+    # Check dl.k8s.io/release/stable.txt which returns format v1.xx.xx
+    local latest=$(curl -fsSL https://dl.k8s.io/release/stable.txt)
     
-    if [ "$latest" != "$KUBERNETES_VERSION" ] && version_compare "$latest" "$KUBERNETES_VERSION"; then
+    if [ -n "$latest" ] && [ "$latest" != "$KUBERNETES_VERSION" ] && version_compare "$latest" "$KUBERNETES_VERSION"; then
         echo "kubernetes:$KUBERNETES_VERSION:$latest"
         return 0
     fi

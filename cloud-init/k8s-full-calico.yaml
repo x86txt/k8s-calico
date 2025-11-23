@@ -279,6 +279,7 @@ runcmd:
 
   # Install containerd
   - apt-get install -y containerd
+
   # Generate default containerd config and modify for systemd cgroups
   - mkdir -p /etc/containerd
   - containerd config default | tee /etc/containerd/config.toml > /dev/null
