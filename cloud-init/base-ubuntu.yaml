@@ -1,0 +1,75 @@
+#cloud-config
+# Base Ubuntu configuration for Proxmox VMs
+# This can be used to create a base image template
+
+package_update: true
+package_upgrade: true
+
+# Set timezone and configure NTP
+timezone: UTC
+ntp:
+  enabled: true
+  servers:
+    - 0.pool.ntp.org
+    - 1.pool.ntp.org
+    - 2.pool.ntp.org
+
+packages:
+  - apt-transport-https
+  - ca-certificates
+  - curl
+  - gnupg
+  - lsb-release
+  - bash-completion
+  - vim
+  - htop
+  - net-tools
+  - iputils-ping
+  - wget
+  - git
+
+users:
+  - name: matt
+    gecos: "Limited User"
+    sudo: ALL=(ALL) NOPASSWD:ALL
+    shell: /bin/bash
+    groups: [sudo]
+    ssh_authorized_keys:
+      - ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKDLDp6znRA+JepG9SOo4NAoB2NFToODqYf5ntRtYAON mat@Matthews-MBP.ip.lan
+
+# Disable password authentication for root
+disable_root: true
+
+# SSH configuration
+ssh_pwauth: false
+ssh_deletekeys: true
+ssh_genkeytypes: ['rsa', 'ecdsa', 'ed25519']
+
+# Write files for common configurations
+write_files:
+  # Enable passwordless sudo for matt (redundant but explicit)
+  - path: /etc/sudoers.d/matt
+    permissions: "0440"
+    content: "matt ALL=(ALL) NOPASSWD:ALL\n"
+
+  # Basic system optimizations
+  - path: /etc/sysctl.d/99-cloud-init.conf
+    permissions: "0644"
+    content: |
+      # Basic network optimizations
+      net.ipv4.tcp_slow_start_after_idle = 0
+      net.ipv4.tcp_tw_reuse = 1
+
+runcmd:
+  # Apply sysctl settings
+  - sysctl --system
+
+  # Clean up apt cache to reduce image size
+  - apt-get clean
+  - apt-get autoremove -y
+
+  # Update system
+  - systemctl restart systemd-timesyncd || true
+
+final_message: "Base Ubuntu image configured. Ready for use as a template."
+

@@ -1,0 +1,428 @@
+#cloud-config
+package_update: true
+package_upgrade: true
+
+# Set timezone and configure NTP
+timezone: UTC
+ntp:
+  enabled: true
+  servers:
+    - 0.pool.ntp.org
+    - 1.pool.ntp.org
+    - 2.pool.ntp.org
+
+packages:
+  - apt-transport-https
+  - ca-certificates
+  - curl
+  - gnupg
+  - lsb-release
+  - bash-completion
+  - vim
+  - htop
+
+users:
+  - name: matt
+    gecos: "Limited User"
+    sudo: ALL=(ALL) NOPASSWD:ALL
+    shell: /bin/bash
+    groups: [sudo]
+    ssh_authorized_keys:
+      - ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKDLDp6znRA+JepG9SOo4NAoB2NFToODqYf5ntRtYAON mat@Matthews-MBP.ip.lan
+
+write_files:
+  # Kernel modules and sysctls for Kubernetes networking
+  - path: /etc/modules-load.d/k8s.conf
+    permissions: "0644"
+    content: |
+      overlay
+      br_netfilter
+  - path: /etc/sysctl.d/k8s.conf
+    permissions: "0644"
+    content: |
+      net.bridge.bridge-nf-call-iptables=1
+      net.bridge.bridge-nf-call-ip6tables=1
+      net.ipv4.ip_forward=1
+
+  # Containerd config will be generated from default in runcmd
+  # (We write a minimal config here, but will use containerd config default as base)
+
+  # kubeadm configuration (control-plane, pod CIDR)
+  # Note: node-ip will be set dynamically in runcmd using cloud-init's local-ipv4
+  - path: /etc/kubernetes/kubeadm-config.yaml
+    permissions: "0644"
+    content: |
+      apiVersion: kubeadm.k8s.io/v1beta3
+      kind: ClusterConfiguration
+      kubernetesVersion: "v1.34.0"
+      networking:
+        podSubnet: "192.168.0.0/16"  # matches Calico default IPv4 pool below
+      ---
+      apiVersion: kubeadm.k8s.io/v1beta3
+      kind: InitConfiguration
+      nodeRegistration:
+        kubeletExtraArgs: {}
+
+  # Calico WireGuard enablement via CRD (kept under source control)
+  - path: /etc/kubernetes/manifests/calico-felix-wireguard.yaml
+    permissions: "0644"
+    content: |
+      apiVersion: crd.projectcalico.org/v1
+      kind: FelixConfiguration
+      metadata:
+        name: default
+      spec:
+        wireguardEnabled: true
+        # Optional: choose the WireGuard interface name
+        wireguardInterfaceName: wg-calico
+        # Optional: enable routing on wg interface for cross-DC scenarios
+        wireguardRoutingEnabled: true
+
+  # Calico IP pool and MTU tuning for cross-DC performance
+  - path: /etc/kubernetes/manifests/calico-ip-pool.yaml
+    permissions: "0644"
+    content: |
+      apiVersion: crd.projectcalico.org/v1
+      kind: IPPool
+      metadata:
+        name: default-ipv4-ippool
+      spec:
+        cidr: 192.168.0.0/16
+        encapsulation: VXLAN
+        natOutgoing: true
+        nodeSelector: all()
+        # MTU tuning: account for WireGuard overhead (lower than NIC MTU)
+        mtu: 1380
+
+  # Kubectl completion for convenience
+  - path: /etc/profile.d/kubectl-completion.sh
+    permissions: "0644"
+    content: |
+      if command -v kubectl >/dev/null 2>&1; then
+        source <(kubectl completion bash)
+      fi
+
+  # Monitoring configuration - update these with your server URLs
+  - path: /etc/monitoring/config.env
+    permissions: "0644"
+    content: |
+      # Prometheus server endpoint (for remote_write or scrape)
+      # Format: http://prometheus-server:9090/api/v1/write
+      # Or leave empty to use Prometheus scrape mode (default port 9100)
+      PROMETHEUS_REMOTE_WRITE_URL=""
+      
+      # SigNoz endpoint for logs and traces
+      # Format: http://signoz-server:4318 (OTLP HTTP) or http://signoz-server:4317 (OTLP gRPC)
+      SIGNOZ_ENDPOINT="http://signoz-server:4318"
+      
+      # Optional: SigNoz API key for authentication
+      SIGNOZ_API_KEY=""
+
+  # Prometheus Node Exporter systemd service
+  - path: /etc/systemd/system/node_exporter.service
+    permissions: "0644"
+    content: |
+      [Unit]
+      Description=Prometheus Node Exporter
+      After=network.target
+
+      [Service]
+      Type=simple
+      User=nobody
+      Group=nogroup
+      ExecStart=/usr/local/bin/node_exporter \
+        --web.listen-address=0.0.0.0:9100 \
+        --collector.filesystem.mount-points-exclude="^/(sys|proc|dev|host|etc)($$|/)"
+      Restart=always
+      RestartSec=5
+
+      [Install]
+      WantedBy=multi-user.target
+
+  # OpenTelemetry Collector configuration template for SigNoz
+  # Note: SIGNOZ_ENDPOINT will be substituted in runcmd
+  - path: /etc/otelcol/config.yaml.template
+    permissions: "0644"
+    content: |
+      receivers:
+        # Collect logs from systemd journal (journald receiver available in contrib)
+        journald:
+          directory: /var/log/journal
+          units: []
+          priority: info
+        
+        # Collect host metrics
+        hostmetrics:
+          collection_interval: 30s
+          scrapers:
+            cpu:
+            disk:
+            load:
+            filesystem:
+            memory:
+            network:
+            paging:
+            process:
+        
+        # Collect node exporter metrics (scraping from local node_exporter)
+        prometheus:
+          config:
+            scrape_configs:
+              - job_name: 'node-exporter'
+                static_configs:
+                  - targets: ['localhost:9100']
+              - job_name: 'kubelet'
+                static_configs:
+                  - targets: ['localhost:10255']
+                metric_relabel_configs:
+                  - source_labels: [__name__]
+                    regex: 'container_.*'
+                    action: keep
+
+      processors:
+        batch:
+          timeout: 10s
+          send_batch_size: 1024
+        resource:
+          attributes:
+            - key: host.name
+              from_attribute: host.name
+              action: upsert
+            - key: service.name
+              value: k8s-node
+              action: upsert
+
+      exporters:
+        # Send to SigNoz via OTLP HTTP
+        otlphttp:
+          endpoint: SIGNOZ_ENDPOINT_PLACEHOLDER
+          tls:
+            insecure: true
+          headers:
+            SIGNOZ_HEADERS_PLACEHOLDER
+
+      service:
+        pipelines:
+          logs:
+            receivers: [journald]
+            processors: [batch, resource]
+            exporters: [otlphttp]
+          metrics:
+            receivers: [hostmetrics, prometheus]
+            processors: [batch, resource]
+            exporters: [otlphttp]
+          traces:
+            receivers: []
+            processors: [batch, resource]
+            exporters: [otlphttp]
+
+  # OpenTelemetry Collector systemd service
+  - path: /etc/systemd/system/otelcol.service
+    permissions: "0644"
+    content: |
+      [Unit]
+      Description=OpenTelemetry Collector
+      After=network.target
+
+      [Service]
+      Type=simple
+      User=otelcol
+      Group=otelcol
+      EnvironmentFile=/etc/monitoring/config.env
+      ExecStart=/usr/local/bin/otelcol \
+        --config=/etc/otelcol/config.yaml
+      Restart=always
+      RestartSec=5
+      StandardOutput=journal
+      StandardError=journal
+
+      [Install]
+      WantedBy=multi-user.target
+
+runcmd:
+  # Disable swap immediately and persistently
+  - sed -i '/ swap / s/^/#/' /etc/fstab
+  - swapoff -a || true
+
+  # Load modules and sysctls
+  - modprobe overlay || true
+  - modprobe br_netfilter || true
+  - sysctl --system
+
+  # Install containerd
+  - apt-get install -y containerd
+  # Generate default containerd config and modify for systemd cgroups
+  - mkdir -p /etc/containerd
+  - containerd config default | tee /etc/containerd/config.toml > /dev/null
+  - sed -i 's/SystemdCgroup = false/SystemdCgroup = true/' /etc/containerd/config.toml
+  - systemctl restart containerd
+  - systemctl enable containerd
+
+  # Add official Kubernetes apt repo (v1.30 stable channel)
+  - curl -fsSL https://pkgs.k8s.io/core:/stable:/v1.34/deb/Release.key | gpg --dearmor -o /usr/share/keyrings/kubernetes-archive-keyring.gpg
+  - echo "deb [signed-by=/usr/share/keyrings/kubernetes-archive-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v1.34/deb/ /" > /etc/apt/sources.list.d/kubernetes.list
+  - apt-get update
+
+  # Install kubelet, kubeadm, kubectl
+  - apt-get install -y kubelet kubeadm kubectl
+  - apt-mark hold kubelet kubeadm kubectl
+
+  # Detect node IP from primary interface and update kubeadm config
+  # This works with Proxmox and other cloud providers
+  - |
+    # Try to get IP from cloud-init datasource first (works with Proxmox)
+    NODE_IP=$(cloud-init query local-ipv4 2>/dev/null || echo '')
+    # Fallback to detecting primary interface IP (portable method)
+    if [ -z "$NODE_IP" ]; then
+      NODE_IP=$(ip route get 8.8.8.8 2>/dev/null | awk '{for(i=1;i<NF;i++){if($i=="src"){print $(i+1);exit}}}' || echo '')
+    fi
+    # If we found an IP, add it to kubeadm config
+    if [ -n "$NODE_IP" ]; then
+      # Use sed to safely insert the node-ip line after kubeletExtraArgs:
+      sed -i "/kubeletExtraArgs:/a\          node-ip: \"$NODE_IP\"" /etc/kubernetes/kubeadm-config.yaml
+      echo "Configured node-ip: $NODE_IP"
+    else
+      echo "Warning: Could not detect node IP, kubeadm will auto-detect"
+    fi
+
+  # Initialize the cluster
+  - kubeadm init --config /etc/kubernetes/kubeadm-config.yaml --ignore-preflight-errors=Swap
+
+  # Configure kubectl for root and matt
+  - mkdir -p /root/.kube /home/matt/.kube
+  - cp /etc/kubernetes/admin.conf /root/.kube/config
+  - chown root:root /root/.kube/config
+  - cp /etc/kubernetes/admin.conf /home/matt/.kube/config
+  - chown matt:matt /home/matt/.kube/config
+  - chmod 600 /root/.kube/config /home/matt/.kube/config
+
+  # Wait for API server to be ready before applying Calico
+  - |
+    echo "Waiting for Kubernetes API server to be ready..."
+    for i in {1..30}; do
+      if kubectl --kubeconfig=/etc/kubernetes/admin.conf get nodes 2>/dev/null; then
+        echo "API server is ready"
+        break
+      fi
+      echo "Waiting... ($i/30)"
+      sleep 10
+    done
+
+  # Install Calico (operator + custom resources)
+  - kubectl --kubeconfig=/etc/kubernetes/admin.conf apply -f https://raw.githubusercontent.com/projectcalico/calico/v3.28.0/manifests/tigera-operator.yaml
+  - sleep 10  # Wait for operator to be ready
+  - kubectl --kubeconfig=/etc/kubernetes/admin.conf apply -f https://raw.githubusercontent.com/projectcalico/calico/v3.28.0/manifests/custom-resources.yaml
+
+  # Wait for Calico to be ready before applying custom configs
+  - |
+    echo "Waiting for Calico to be ready..."
+    for i in {1..60}; do
+      if kubectl --kubeconfig=/etc/kubernetes/admin.conf get felixconfiguration default 2>/dev/null; then
+        echo "Calico is ready"
+        break
+      fi
+      echo "Waiting for Calico... ($i/60)"
+      sleep 5
+    done
+
+  # Apply WireGuard enablement and IP pool MTU tuning via CRDs
+  - kubectl --kubeconfig=/etc/kubernetes/admin.conf apply -f /etc/kubernetes/manifests/calico-felix-wireguard.yaml
+  - kubectl --kubeconfig=/etc/kubernetes/admin.conf apply -f /etc/kubernetes/manifests/calico-ip-pool.yaml
+
+  # Allow workloads on control-plane
+  - kubectl --kubeconfig=/etc/kubernetes/admin.conf taint nodes --all node-role.kubernetes.io/control-plane-
+
+  # Save join command for partners
+  - |
+    kubeadm token create --print-join-command > /root/join.sh
+    chmod +x /root/join.sh
+    echo "Join command saved to /root/join.sh"
+
+  # Display cluster status
+  - kubectl --kubeconfig=/etc/kubernetes/admin.conf get nodes
+  - kubectl --kubeconfig=/etc/kubernetes/admin.conf get pods -n calico-system
+
+  # Install and configure Prometheus Node Exporter
+  - |
+    echo "Installing Prometheus Node Exporter..."
+    NODE_EXPORTER_VERSION="1.7.0"
+    NODE_EXPORTER_URL="https://github.com/prometheus/node_exporter/releases/download/v${NODE_EXPORTER_VERSION}/node_exporter-${NODE_EXPORTER_VERSION}.linux-amd64.tar.gz"
+    cd /tmp
+    curl -L -o node_exporter.tar.gz "${NODE_EXPORTER_URL}"
+    tar xzf node_exporter.tar.gz
+    cp node_exporter-${NODE_EXPORTER_VERSION}.linux-amd64/node_exporter /usr/local/bin/node_exporter
+    chmod +x /usr/local/bin/node_exporter
+    rm -rf node_exporter.tar.gz node_exporter-${NODE_EXPORTER_VERSION}.linux-amd64
+    systemctl daemon-reload
+    systemctl enable node_exporter
+    systemctl start node_exporter
+    echo "Prometheus Node Exporter installed and started on port 9100"
+
+  # Install and configure OpenTelemetry Collector for SigNoz
+  # Using contrib distribution for additional receivers (journald, etc.)
+  - |
+    echo "Installing OpenTelemetry Collector (Contrib)..."
+    OTELCOL_VERSION="0.102.0"
+    OTELCOL_URL="https://github.com/open-telemetry/opentelemetry-collector-releases/releases/download/v${OTELCOL_VERSION}/otelcol-contrib_${OTELCOL_VERSION}_linux_amd64.tar.gz"
+    cd /tmp
+    curl -L -o otelcol.tar.gz "${OTELCOL_URL}"
+    tar xzf otelcol.tar.gz
+    cp otelcol-contrib /usr/local/bin/otelcol
+    chmod +x /usr/local/bin/otelcol
+    rm -f otelcol.tar.gz LICENSE README.md
+    # Create otelcol user and directories
+    useradd -r -s /bin/false otelcol || true
+    mkdir -p /etc/otelcol
+    # Source config and generate final config file
+    source /etc/monitoring/config.env
+    # Set defaults if not configured
+    SIGNOZ_ENDPOINT=${SIGNOZ_ENDPOINT:-"http://signoz-server:4318"}
+    # Generate config file from template
+    cp /etc/otelcol/config.yaml.template /etc/otelcol/config.yaml
+    # Replace endpoint placeholder
+    sed -i "s|SIGNOZ_ENDPOINT_PLACEHOLDER|${SIGNOZ_ENDPOINT}|g" /etc/otelcol/config.yaml
+    # Handle API key header
+    if [ -n "$SIGNOZ_API_KEY" ]; then
+      sed -i "s|SIGNOZ_HEADERS_PLACEHOLDER|signoz-api-key: \"${SIGNOZ_API_KEY}\"|g" /etc/otelcol/config.yaml
+    else
+      sed -i "s|SIGNOZ_HEADERS_PLACEHOLDER||g" /etc/otelcol/config.yaml
+    fi
+    chown -R otelcol:otelcol /etc/otelcol
+    chmod 644 /etc/otelcol/config.yaml
+    systemctl daemon-reload
+    systemctl enable otelcol
+    systemctl start otelcol
+    echo "OpenTelemetry Collector installed and started"
+    echo "SigNoz endpoint configured: ${SIGNOZ_ENDPOINT}"
+
+  # Verify monitoring services are running
+  - |
+    echo "Checking monitoring services status..."
+    systemctl status node_exporter --no-pager || true
+    systemctl status otelcol --no-pager || true
+    echo "Node Exporter metrics available at: http://$(hostname -I | awk '{print $1}'):9100/metrics"
+
+final_message: |
+  Single-node Kubernetes with Calico + WireGuard is ready!
+  
+  Cluster Status:
+  - Use 'kubectl get nodes' to check node status
+  - Use 'kubectl get pods -n calico-system' to check Calico pods
+  - Join command saved to /root/join.sh for worker nodes
+  
+  Monitoring Services:
+  - Prometheus Node Exporter: Running on port 9100
+    Metrics available at: http://<node-ip>:9100/metrics
+    Configure your Prometheus server to scrape this endpoint
+  
+  - OpenTelemetry Collector: Running and collecting logs/metrics
+    Configure SigNoz endpoint in: /etc/monitoring/config.env
+    Current endpoint: Check /etc/monitoring/config.env
+    Restart service after changes: systemctl restart otelcol
+  
+  Next steps:
+  1. Update /etc/monitoring/config.env with your SigNoz server URL
+  2. Restart otelcol: systemctl restart otelcol
+  3. Configure Prometheus to scrape node_exporter on port 9100
+  4. Copy /root/join.sh to worker nodes
+  5. Run the join command on worker nodes to add them to the cluster
