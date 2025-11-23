@@ -164,7 +164,7 @@ log "Installing Kubernetes components..."
 
 # Add Kubernetes repository
 curl -fsSL https://pkgs.k8s.io/core:/stable:/v1.34/deb/Release.key | \
-    gpg --dearmor -o /usr/share/keyrings/kubernetes-archive-keyring.gpg
+    gpg --dearmor --yes -o /usr/share/keyrings/kubernetes-archive-keyring.gpg
 
 echo "deb [signed-by=/usr/share/keyrings/kubernetes-archive-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v1.34/deb/ /" > \
     /etc/apt/sources.list.d/kubernetes.list
