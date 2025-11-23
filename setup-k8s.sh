@@ -3,6 +3,9 @@
 # Equivalent to cloud-init/k8s-full-calico.yaml
 # Run as root on a fresh Ubuntu 22.04+ system
 
+# Parse arguments first before setting strict mode
+ARG1="${1:-}"
+
 set -euo pipefail
 
 # Version constants (update these as needed)
@@ -176,13 +179,13 @@ uninstall() {
 }
 
 # Check for uninstall flag
-if [[ "${1:-}" == "--uninstall" ]] || [[ "${1:-}" == "-u" ]]; then
+if [[ "$ARG1" == "--uninstall" ]] || [[ "$ARG1" == "-u" ]]; then
     uninstall
     exit 0
 fi
 
 # Show usage if help requested
-if [[ "${1:-}" == "--help" ]] || [[ "${1:-}" == "-h" ]]; then
+if [[ "$ARG1" == "--help" ]] || [[ "$ARG1" == "-h" ]]; then
     echo "Usage: $0 [OPTIONS]"
     echo ""
     echo "Options:"
@@ -191,6 +194,13 @@ if [[ "${1:-}" == "--help" ]] || [[ "${1:-}" == "-h" ]]; then
     echo ""
     echo "Without options, installs Kubernetes + Calico + monitoring"
     exit 0
+fi
+
+# Warn if unknown argument provided
+if [[ -n "$ARG1" ]]; then
+    warn "Unknown argument: $ARG1"
+    echo "Use --help for usage information"
+    exit 1
 fi
 
 log "Starting Kubernetes + Calico setup..."
