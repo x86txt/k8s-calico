@@ -287,7 +287,7 @@ runcmd:
   - systemctl enable containerd
 
   # Add official Kubernetes apt repo (v1.30 stable channel)
-  - curl -fsSL https://pkgs.k8s.io/core:/stable:/v1.34/deb/Release.key | gpg --dearmor -o /usr/share/keyrings/kubernetes-archive-keyring.gpg
+  - curl -fsSL https://pkgs.k8s.io/core:/stable:/v1.34/deb/Release.key | gpg --dearmor --yes -o /usr/share/keyrings/kubernetes-archive-keyring.gpg
   - echo "deb [signed-by=/usr/share/keyrings/kubernetes-archive-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v1.34/deb/ /" > /etc/apt/sources.list.d/kubernetes.list
   - apt-get update
 
@@ -373,7 +373,7 @@ runcmd:
   # Install and configure Prometheus Node Exporter
   - |
     echo "Installing Prometheus Node Exporter..."
-    NODE_EXPORTER_VERSION="1.7.0"
+    NODE_EXPORTER_VERSION="1.10.2"
     NODE_EXPORTER_URL="https://github.com/prometheus/node_exporter/releases/download/v${NODE_EXPORTER_VERSION}/node_exporter-${NODE_EXPORTER_VERSION}.linux-amd64.tar.gz"
     cd /tmp
     curl -L -o node_exporter.tar.gz "${NODE_EXPORTER_URL}"
@@ -390,7 +390,7 @@ runcmd:
   # Using contrib distribution for additional receivers (journald, etc.)
   - |
     echo "Installing OpenTelemetry Collector (Contrib)..."
-    OTELCOL_VERSION="0.102.0"
+    OTELCOL_VERSION="0.140.1"
     OTELCOL_URL="https://github.com/open-telemetry/opentelemetry-collector-releases/releases/download/v${OTELCOL_VERSION}/otelcol-contrib_${OTELCOL_VERSION}_linux_amd64.tar.gz"
     cd /tmp
     curl -L -o otelcol.tar.gz "${OTELCOL_URL}"

@@ -565,7 +565,7 @@ KEY_DOWNLOADED=false
 
 # Method 1: Try pkgs.k8s.io with version in path
 if curl -fsSL "https://pkgs.k8s.io/core:/stable:/${KUBERNETES_VERSION}/deb/Release.key" 2>/dev/null | \
-   gpg --dearmor -o /usr/share/keyrings/kubernetes-archive-keyring.gpg 2>/dev/null; then
+   gpg --dearmor --yes -o /usr/share/keyrings/kubernetes-archive-keyring.gpg 2>/dev/null; then
     KEY_DOWNLOADED=true
     log "Downloaded key from pkgs.k8s.io (version-specific)"
 fi
@@ -573,7 +573,7 @@ fi
 # Method 2: Try pkgs.k8s.io without version (stable channel)
 if [ "$KEY_DOWNLOADED" = false ]; then
     if curl -fsSL "https://pkgs.k8s.io/core:/stable:/v1.34/deb/Release.key" 2>/dev/null | \
-       gpg --dearmor -o /usr/share/keyrings/kubernetes-archive-keyring.gpg 2>/dev/null; then
+       gpg --dearmor --yes -o /usr/share/keyrings/kubernetes-archive-keyring.gpg 2>/dev/null; then
         KEY_DOWNLOADED=true
         log "Downloaded key from pkgs.k8s.io (stable channel)"
     fi
@@ -582,7 +582,7 @@ fi
 # Method 3: Fallback to legacy Kubernetes signing key
 if [ "$KEY_DOWNLOADED" = false ]; then
     if curl -fsSL "https://dl.k8s.io/apt/doc/apt-key.gpg" 2>/dev/null | \
-       gpg --dearmor -o /usr/share/keyrings/kubernetes-archive-keyring.gpg 2>/dev/null; then
+       gpg --dearmor --yes -o /usr/share/keyrings/kubernetes-archive-keyring.gpg 2>/dev/null; then
         KEY_DOWNLOADED=true
         log "Downloaded key from legacy Kubernetes repository"
     fi
