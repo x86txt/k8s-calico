@@ -343,15 +343,61 @@ log "Containerd installed and configured"
 log "Installing Kubernetes components..."
 
 # Add Kubernetes repository
+# Create keyrings directory if it doesn't exist
+mkdir -p /etc/apt/keyrings /usr/share/keyrings
+
 # Remove old keyring if it exists
 rm -f /usr/share/keyrings/kubernetes-archive-keyring.gpg 2>/dev/null || true
+rm -f /etc/apt/keyrings/kubernetes-archive-keyring.gpg 2>/dev/null || true
 
 # Download and import GPG key
-curl -fsSL "https://pkgs.k8s.io/core:/stable:/${KUBERNETES_VERSION}/deb/Release.key" | \
-    gpg --dearmor -o /usr/share/keyrings/kubernetes-archive-keyring.gpg
+# Try multiple methods to handle different repository structures
+log "Downloading Kubernetes GPG key..."
+KEY_DOWNLOADED=false
 
-echo "deb [signed-by=/usr/share/keyrings/kubernetes-archive-keyring.gpg] https://pkgs.k8s.io/core:/stable:/${KUBERNETES_VERSION}/deb/ /" > \
-    /etc/apt/sources.list.d/kubernetes.list
+# Method 1: Try pkgs.k8s.io with version in path
+if curl -fsSL "https://pkgs.k8s.io/core:/stable:/${KUBERNETES_VERSION}/deb/Release.key" 2>/dev/null | \
+   gpg --dearmor -o /usr/share/keyrings/kubernetes-archive-keyring.gpg 2>/dev/null; then
+    KEY_DOWNLOADED=true
+    log "Downloaded key from pkgs.k8s.io (version-specific)"
+fi
+
+# Method 2: Try pkgs.k8s.io without version (stable channel)
+if [ "$KEY_DOWNLOADED" = false ]; then
+    if curl -fsSL "https://pkgs.k8s.io/core:/stable:/v1.34/deb/Release.key" 2>/dev/null | \
+       gpg --dearmor -o /usr/share/keyrings/kubernetes-archive-keyring.gpg 2>/dev/null; then
+        KEY_DOWNLOADED=true
+        log "Downloaded key from pkgs.k8s.io (stable channel)"
+    fi
+fi
+
+# Method 3: Fallback to legacy Kubernetes signing key
+if [ "$KEY_DOWNLOADED" = false ]; then
+    if curl -fsSL "https://dl.k8s.io/apt/doc/apt-key.gpg" 2>/dev/null | \
+       gpg --dearmor -o /usr/share/keyrings/kubernetes-archive-keyring.gpg 2>/dev/null; then
+        KEY_DOWNLOADED=true
+        log "Downloaded key from legacy Kubernetes repository"
+    fi
+fi
+
+# Verify the key was created
+if [ "$KEY_DOWNLOADED" = false ] || [ ! -f /usr/share/keyrings/kubernetes-archive-keyring.gpg ]; then
+    error "Failed to download Kubernetes GPG key. Please check your network connection and firewall settings."
+fi
+
+log "Kubernetes GPG key downloaded successfully"
+
+# Add repository (try version-specific first, fallback to stable)
+if curl -fsSL "https://pkgs.k8s.io/core:/stable:/${KUBERNETES_VERSION}/deb/" --head 2>/dev/null | grep -q "200 OK"; then
+    echo "deb [signed-by=/usr/share/keyrings/kubernetes-archive-keyring.gpg] https://pkgs.k8s.io/core:/stable:/${KUBERNETES_VERSION}/deb/ /" > \
+        /etc/apt/sources.list.d/kubernetes.list
+    log "Added Kubernetes repository for version ${KUBERNETES_VERSION}"
+else
+    # Fallback to stable channel
+    echo "deb [signed-by=/usr/share/keyrings/kubernetes-archive-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v1.34/deb/ /" > \
+        /etc/apt/sources.list.d/kubernetes.list
+    log "Added Kubernetes repository (stable channel)"
+fi
 
 apt-get update -qq
 
