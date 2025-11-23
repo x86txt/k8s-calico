@@ -35,6 +35,164 @@ if [ "$EUID" -ne 0 ]; then
     error "Please run as root"
 fi
 
+# ============================================================================
+# Uninstall Function
+# ============================================================================
+
+uninstall() {
+    log "Starting uninstall process..."
+    warn "This will remove all Kubernetes, Calico, and monitoring components!"
+    echo ""
+    read -p "Are you sure you want to continue? (yes/no): " -r
+    echo ""
+    if [[ ! $REPLY =~ ^[Yy][Ee][Ss]$ ]]; then
+        log "Uninstall cancelled"
+        exit 0
+    fi
+    
+    # Temporarily disable exit on error for uninstall (many things may not exist)
+    set +e
+    
+    # Stop and disable monitoring services
+    log "Stopping monitoring services..."
+    systemctl stop node_exporter 2>/dev/null || true
+    systemctl stop otelcol 2>/dev/null || true
+    systemctl disable node_exporter 2>/dev/null || true
+    systemctl disable otelcol 2>/dev/null || true
+    
+    # Remove systemd service files
+    log "Removing systemd service files..."
+    rm -f /etc/systemd/system/node_exporter.service
+    rm -f /etc/systemd/system/otelcol.service
+    systemctl daemon-reload
+    
+    # Remove monitoring binaries
+    log "Removing monitoring binaries..."
+    rm -f /usr/local/bin/node_exporter
+    rm -f /usr/local/bin/otelcol
+    
+    # Remove monitoring users
+    log "Removing monitoring users..."
+    userdel -r otelcol 2>/dev/null || true
+    
+    # Remove monitoring configuration directories
+    log "Removing monitoring configuration..."
+    rm -rf /etc/monitoring
+    rm -rf /etc/otelcol
+    
+    # Reset Kubernetes cluster if it exists
+    log "Resetting Kubernetes cluster..."
+    if command -v kubeadm &>/dev/null; then
+        kubeadm reset --force --cri-socket=unix:///var/run/containerd/containerd.sock 2>/dev/null || true
+    fi
+    
+    # Stop and disable Kubernetes services
+    log "Stopping Kubernetes services..."
+    systemctl stop kubelet 2>/dev/null || true
+    systemctl stop containerd 2>/dev/null || true
+    systemctl disable kubelet 2>/dev/null || true
+    systemctl disable containerd 2>/dev/null || true
+    
+    # Purge Kubernetes packages
+    log "Purging Kubernetes packages..."
+    apt-mark unhold kubelet kubeadm kubectl 2>/dev/null || true
+    apt-get purge -y -qq kubelet kubeadm kubectl 2>/dev/null || true
+    apt-get autoremove -y -qq 2>/dev/null || true
+    
+    # Purge containerd
+    log "Purging containerd..."
+    apt-get purge -y -qq containerd 2>/dev/null || true
+    apt-get autoremove -y -qq 2>/dev/null || true
+    
+    # Remove Kubernetes configuration directories
+    log "Removing Kubernetes configuration..."
+    rm -rf /etc/kubernetes
+    rm -rf /var/lib/kubelet
+    rm -rf /var/lib/etcd
+    rm -rf /root/.kube
+    rm -f /root/join.sh
+    
+    # Remove kubectl config for matt user
+    rm -rf /home/matt/.kube 2>/dev/null || true
+    
+    # Remove Kubernetes repository
+    log "Removing Kubernetes repository..."
+    rm -f /etc/apt/sources.list.d/kubernetes.list
+    rm -f /usr/share/keyrings/kubernetes-archive-keyring.gpg
+    apt-get update -qq 2>/dev/null || true
+    
+    # Remove kernel module configurations
+    log "Removing kernel module configurations..."
+    rm -f /etc/modules-load.d/k8s.conf
+    
+    # Remove sysctl configurations
+    log "Removing sysctl configurations..."
+    rm -f /etc/sysctl.d/k8s.conf
+    # Note: We keep 99-cloud-init.conf as it has general network optimizations
+    
+    # Unload kernel modules (may fail if in use, that's okay)
+    log "Unloading kernel modules..."
+    modprobe -r br_netfilter 2>/dev/null || true
+    modprobe -r overlay 2>/dev/null || true
+    
+    # Remove kubectl completion
+    log "Removing kubectl completion..."
+    rm -f /etc/profile.d/kubectl-completion.sh
+    
+    # Clean up any remaining temporary files
+    log "Cleaning up temporary files..."
+    rm -rf /tmp/kubeadm-config.yaml.tmp 2>/dev/null || true
+    rm -rf /tmp/tigera-operator.yaml 2>/dev/null || true
+    rm -rf /tmp/custom-resources.yaml 2>/dev/null || true
+    
+    # Clean up iptables rules (Kubernetes may have left some)
+    log "Cleaning up iptables rules..."
+    iptables -F 2>/dev/null || true
+    iptables -t nat -F 2>/dev/null || true
+    iptables -t mangle -F 2>/dev/null || true
+    iptables -X 2>/dev/null || true
+    iptables -t nat -X 2>/dev/null || true
+    iptables -t mangle -X 2>/dev/null || true
+    
+    ip6tables -F 2>/dev/null || true
+    ip6tables -t nat -F 2>/dev/null || true
+    ip6tables -t mangle -F 2>/dev/null || true
+    ip6tables -X 2>/dev/null || true
+    ip6tables -t nat -X 2>/dev/null || true
+    ip6tables -t mangle -X 2>/dev/null || true
+    
+    log "Uninstall complete!"
+    log "Note: User 'matt' and SSH configuration were not removed"
+    log "Note: System packages and network optimizations were not removed"
+    echo ""
+    # Re-enable exit on error
+    set -e
+    
+    log "To fully clean up, you may also want to:"
+    echo "  - Remove user 'matt' if desired: userdel -r matt"
+    echo "  - Restore original SSH config if modified"
+    echo "  - Remove /etc/sysctl.d/99-cloud-init.conf if desired"
+    echo ""
+}
+
+# Check for uninstall flag
+if [[ "${1:-}" == "--uninstall" ]] || [[ "${1:-}" == "-u" ]]; then
+    uninstall
+    exit 0
+fi
+
+# Show usage if help requested
+if [[ "${1:-}" == "--help" ]] || [[ "${1:-}" == "-h" ]]; then
+    echo "Usage: $0 [OPTIONS]"
+    echo ""
+    echo "Options:"
+    echo "  --uninstall, -u    Uninstall all Kubernetes and monitoring components"
+    echo "  --help, -h         Show this help message"
+    echo ""
+    echo "Without options, installs Kubernetes + Calico + monitoring"
+    exit 0
+fi
+
 log "Starting Kubernetes + Calico setup..."
 
 # ============================================================================
